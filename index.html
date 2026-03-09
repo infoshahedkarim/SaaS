@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>One-Click Deploy</title>
+    <style>
+        body {
+            font-family: system-ui;
+            background: #0b1220;
+            color: #e8eefc;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center
+        }
+
+        .card {
+            width: min(640px, 92vw);
+            background: #0f1b33;
+            border: 1px solid #22345e;
+            border-radius: 18px;
+            padding: 22px
+        }
+
+        h2 {
+            margin: 0 0 10px
+        }
+
+        label {
+            display: block;
+            margin-top: 10px;
+            font-size: 12px;
+            opacity: .9
+        }
+
+        input,
+        button {
+            width: 100%;
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px solid #2a3f73;
+            background: #0b1630;
+            color: #e8eefc;
+            box-sizing: border-box
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #4f7cff;
+            box-shadow: 0 0 0 4px rgba(79, 124, 255, .15)
+        }
+
+        button {
+            background: #4f7cff;
+            border: 0;
+            color: #071127;
+            font-weight: 800;
+            cursor: pointer;
+            margin-top: 14px
+        }
+
+        button:disabled {
+            opacity: .6;
+            cursor: not-allowed
+        }
+
+        .ghost {
+            background: transparent;
+            border: 1px solid #2a3f73;
+            color: #e8eefc;
+            margin-top: 10px
+        }
+
+        /* status banner */
+        .status {
+            border: 1px solid #22345e;
+            border-radius: 14px;
+            padding: 12px 12px;
+            margin-bottom: 14px;
+            background: #081024
+        }
+
+        .status.ok {
+            border-color: #2f6bff
+        }
+
+        .status.err {
+            border-color: #ff4f4f
+        }
+
+        .status .title {
+            font-weight: 800;
+            margin-bottom: 4px
+        }
+
+        .status .msg {
+            opacity: .9;
+            white-space: pre-wrap
+        }
+
+        /* progress */
+        .progressWrap {
+            margin-top: 14px
+        }
+
+        .barOuter {
+            height: 14px;
+            border-radius: 999px;
+            border: 1px solid #22345e;
+            background: #081024;
+            overflow: hidden
+        }
+
+        .barInner {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4f7cff, #62ffb8);
+            transition: width .25s ease
+        }
+
+        .meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 8px;
+            font-size: 12px;
+            opacity: .85
+        }
+
+        .row {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px
+        }
+
+        .row>button {
+            margin-top: 0
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2>One-Click Local Deploy</h2>
+
+        <!-- TOP STATUS -->
+        <div id="statusBox" class="status">
+            <div class="title" id="statusTitle">Ready</div>
+            <div class="msg" id="statusMsg">Click Deploy Now to start.</div>
+        </div>
+
+        <label>Repo URL</label>
+        <input hidden id="repoUrl" value="https://github.com/infoshahedkarim/eit-bd.git" />
+
+        <label>Target Folder</label>
+        <input hidden id="targetDir" value="E:\\_aasync\\_idea" />
+
+        <label>Branch (optional)</label>
+        <input hidden id="branch" placeholder="master" />
+
+        <button id="deployBtn">Deploy Now</button>
+
+        <div class="row">
+            <button id="healthBtn" class="ghost">Check Backend</button>
+            <button id="resetBtn" class="ghost">Reset</button>
+        </div>
+
+        <!-- PROGRESS -->
+        <div class="progressWrap">
+            <div class="barOuter">
+                <div id="bar" class="barInner"></div>
+            </div>
+            <div class="meta">
+                <span id="percentText">0%</span>
+                <span id="stepText">Idle</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const deployBtn = document.getElementById("deployBtn");
+        const healthBtn = document.getElementById("healthBtn");
+        const resetBtn = document.getElementById("resetBtn");
+
+        const statusBox = document.getElementById("statusBox");
+        const statusTitle = document.getElementById("statusTitle");
+        const statusMsg = document.getElementById("statusMsg");
+
+        const bar = document.getElementById("bar");
+        const percentText = document.getElementById("percentText");
+        const stepText = document.getElementById("stepText");
+
+        let evt = null;
+
+        function setStatus(type, title, msg) {
+            statusBox.classList.remove("ok", "err");
+            if (type) statusBox.classList.add(type);
+            statusTitle.textContent = title;
+            statusMsg.textContent = msg;
+        }
+
+        function setProgress(pct, step) {
+            const p = Math.max(0, Math.min(100, pct));
+            bar.style.width = p + "%";
+            percentText.textContent = p + "%";
+            stepText.textContent = step || "";
+        }
+
+        function resetUI() {
+            if (evt) { try { evt.close() } catch (e) { } evt = null; }
+            deployBtn.disabled = false;
+            setStatus("", "Ready", "Click Deploy Now to start.");
+            setProgress(0, "Idle");
+        }
+
+        async function postJSON(url, data) {
+            const res = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(data)
+            });
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+        }
+
+        // crude progress mapping from backend log lines
+        function inferProgress(line) {
+            const L = (line || "").toLowerCase();
+
+            // errors
+            if (L.includes("❌") || L.includes("fatal:") || L.includes("failed")) return { pct: 100, step: "Failed", err: true };
+
+            // steps
+            if (L.includes("target folder:")) return { pct: 5, step: "Preparing folder" };
+            if (L.includes("cloning")) return { pct: 20, step: "Cloning repo" };
+            if (L.includes("composer install")) return { pct: 55, step: "Installing dependencies" };
+            if (L.includes("copying .env.example")) return { pct: 70, step: "Creating .env" };
+            if (L.includes("key:generate")) return { pct: 80, step: "Generating APP_KEY" };
+            if (L.includes("starting: php artisan serve")) return { pct: 90, step: "Starting server" };
+            if (L.includes("✅ done")) return { pct: 100, step: "Completed", done: true };
+
+            return null;
+        }
+
+        healthBtn.onclick = async () => {
+            setStatus("", "Checking…", "Trying to reach backend on 127.0.0.1:5050");
+            try {
+                const r = await fetch("http://127.0.0.1:5050/health");
+                const t = await r.text();
+                setStatus("ok", "Backend OK", t);
+            } catch (e) {
+                setStatus("err", "Backend Not Reachable", "Run this in CMD:  node server.js\nThen allow firewall if asked.");
+            }
+        };
+
+        resetBtn.onclick = resetUI;
+
+        deployBtn.onclick = async () => {
+            resetUI();
+            deployBtn.disabled = true;
+
+            const payload = {
+                repoUrl: document.getElementById("repoUrl").value.trim(),
+                targetDir: document.getElementById("targetDir").value.trim(),
+                branch: document.getElementById("branch").value.trim()
+            };
+
+            if (!payload.repoUrl || !payload.targetDir) {
+                setStatus("err", "Missing info", "Repo URL and Target Folder are required.");
+                deployBtn.disabled = false;
+                return;
+            }
+
+            try {
+                setStatus("", "Starting…", "Sending deploy request to local backend.");
+                setProgress(2, "Initializing");
+
+                const { jobId } = await postJSON("http://127.0.0.1:5050/deploy", payload);
+
+                setStatus("", "Deploy Running", "Job ID: " + jobId);
+                setProgress(5, "Preparing");
+
+                evt = new EventSource("http://127.0.0.1:5050/logs?jobId=" + encodeURIComponent(jobId));
+
+                evt.onmessage = (e) => {
+                    const line = e.data || "";
+
+                    // Show latest line on top
+                    setStatus("", "Deploy Running", line);
+
+                    const info = inferProgress(line);
+                    if (info) {
+                        setProgress(info.pct, info.step);
+                        if (info.err) {
+                            setStatus("err", "Deploy Failed", line);
+                            deployBtn.disabled = false;
+                            try { evt.close() } catch (x) { }
+                            evt = null;
+                        }
+                        if (info.done) {
+                            setStatus("ok", "Deploy Completed", "Project deployed and server started.");
+                            deployBtn.disabled = false;
+                            try { evt.close() } catch (x) { }
+                            evt = null;
+                        }
+                    }
+                };
+
+                evt.onerror = () => {
+                    // not always an error; SSE closes when job ends
+                    // keep UI usable
+                    if (deployBtn.disabled) deployBtn.disabled = false;
+                };
+
+            } catch (e) {
+                setStatus("err", "Deploy Failed", String(e));
+                setProgress(0, "Idle");
+                deployBtn.disabled = false;
+            }
+        };
+    </script>
+</body>
+
+</html>
